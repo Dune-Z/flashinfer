@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+
 import numpy
 import pytest
 import torch
@@ -54,11 +55,12 @@ def test_batch_decode_with_paged_kv_cache(
         (batch_size,), (kv_len - 1) % page_size + 1, dtype=torch.int32
     ).to(0)
 
-    wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(kv_layout)
+    workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.int8).to(0)
+    wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(workspace_buffer, kv_layout)
     wrapper.begin_forward(
         kv_indptr,
+        kv_indices,
         kv_last_page_len,
-        batch_size,
         num_qo_heads,
         num_kv_heads,
         head_dim,
@@ -66,7 +68,7 @@ def test_batch_decode_with_paged_kv_cache(
         "NONE",
         "float16",
     )
-    o = wrapper.forward(q, kv_data, kv_indptr, kv_indices, kv_last_page_len)
+    o = wrapper.forward(q, kv_data)
 
     for i in range(batch_size):
         perm_dims = [0, 2, 1, 3] if kv_layout == "HND" else [0, 1, 2, 3]
@@ -102,7 +104,7 @@ def test_batch_decode_with_paged_kv_cache(
             ],
             dim=0,
         )
-        o_ref_i = flashinfer.ops.single_decode_with_kv_cache(qi, ki, vi)
+        o_ref_i = flashinfer.single_decode_with_kv_cache(qi, ki, vi)
         o_i_np = o[i].cpu().numpy()
         o_ref_i_np = o_ref_i.cpu().numpy()
         numpy.testing.assert_allclose(o_i_np, o_ref_i_np, rtol=1e-3, atol=1e-3)

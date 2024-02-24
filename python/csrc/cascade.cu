@@ -39,15 +39,16 @@ std::vector<torch::Tensor> merge_state(torch::Tensor v_a, torch::Tensor s_a, tor
   unsigned int seq_len = v_a.size(0);
   unsigned int num_heads = v_a.size(1);
   unsigned int head_dim = v_a.size(2);
+  cudaStream_t torch_current_stream = c10::cuda::getCurrentCUDAStream();
   auto v_merged = torch::empty_like(v_a, v_a.options());
   auto s_merged = torch::empty({seq_len, num_heads}, s_a.options());
 
   bool success = DISPATCH_PYTORCH_DTYPE_TO_CTYPE(v_a.scalar_type(), c_type, [&] {
-    cudaError_t status =
-        MergeState(static_cast<c_type*>(v_a.data_ptr()), static_cast<float*>(s_a.data_ptr()),
-                   static_cast<c_type*>(v_b.data_ptr()), static_cast<float*>(s_b.data_ptr()),
-                   static_cast<c_type*>(v_merged.data_ptr()),
-                   static_cast<float*>(s_merged.data_ptr()), seq_len, num_heads, head_dim);
+    cudaError_t status = MergeState(
+        static_cast<c_type*>(v_a.data_ptr()), static_cast<float*>(s_a.data_ptr()),
+        static_cast<c_type*>(v_b.data_ptr()), static_cast<float*>(s_b.data_ptr()),
+        static_cast<c_type*>(v_merged.data_ptr()), static_cast<float*>(s_merged.data_ptr()),
+        seq_len, num_heads, head_dim, torch_current_stream);
     TORCH_CHECK(status == cudaSuccess,
                 "MergeState kernel launch failed: ", cudaGetErrorString(status));
     return true;
@@ -55,6 +56,40 @@ std::vector<torch::Tensor> merge_state(torch::Tensor v_a, torch::Tensor s_a, tor
 
   TORCH_CHECK(success, "MergeState kernel launch failed: unsupported data type");
   return {v_merged, s_merged};
+}
+
+void merge_state_in_place(torch::Tensor v, torch::Tensor s, torch::Tensor v_other,
+                          torch::Tensor s_other) {
+  CHECK_INPUT(v);
+  CHECK_INPUT(s);
+  CHECK_INPUT(v_other);
+  CHECK_INPUT(s_other);
+  CHECK_DIM(3, v);
+  CHECK_DIM(2, s);
+  CHECK_DIM(3, v_other);
+  CHECK_DIM(2, s_other);
+  CHECK_SHAPE(v, v_other);
+  CHECK_SHAPE(s, s_other);
+  CHECK_EQ(v.size(0), s.size(0));
+  CHECK_EQ(v.size(1), s.size(1));
+  CHECK_EQ(s.scalar_type(), torch::kFloat32);
+  CHECK_EQ(s_other.scalar_type(), torch::kFloat32);
+  unsigned int seq_len = v.size(0);
+  unsigned int num_heads = v.size(1);
+  unsigned int head_dim = v.size(2);
+  cudaStream_t torch_current_stream = c10::cuda::getCurrentCUDAStream();
+
+  bool success = DISPATCH_PYTORCH_DTYPE_TO_CTYPE(v.scalar_type(), c_type, [&] {
+    cudaError_t status = MergeStateInPlace(
+        static_cast<c_type*>(v.data_ptr()), static_cast<float*>(s.data_ptr()),
+        static_cast<c_type*>(v_other.data_ptr()), static_cast<float*>(s_other.data_ptr()), seq_len,
+        num_heads, head_dim, torch_current_stream);
+    TORCH_CHECK(status == cudaSuccess,
+                "MergeStateInPlace kernel launch failed: ", cudaGetErrorString(status));
+    return true;
+  });
+
+  TORCH_CHECK(success, "MergeStateInPlace kernel launch failed: unsupported data type");
 }
 
 std::vector<torch::Tensor> merge_states(torch::Tensor v, torch::Tensor s) {
@@ -70,6 +105,7 @@ std::vector<torch::Tensor> merge_states(torch::Tensor v, torch::Tensor s) {
   unsigned int num_heads = v.size(2);
   unsigned int head_dim = v.size(3);
   s = s.to(torch::kFloat32);
+  cudaStream_t torch_current_stream = c10::cuda::getCurrentCUDAStream();
   auto v_merged = torch::empty({seq_len, num_heads, head_dim}, v.options());
   auto s_merged = torch::empty({seq_len, num_heads}, s.options());
 
@@ -77,7 +113,7 @@ std::vector<torch::Tensor> merge_states(torch::Tensor v, torch::Tensor s) {
     cudaError_t status = MergeStates(
         static_cast<c_type*>(v.data_ptr()), static_cast<float*>(s.data_ptr()),
         static_cast<c_type*>(v_merged.data_ptr()), static_cast<float*>(s_merged.data_ptr()),
-        num_index_sets, seq_len, num_heads, head_dim);
+        num_index_sets, seq_len, num_heads, head_dim, torch_current_stream);
     TORCH_CHECK(status == cudaSuccess,
                 "MergeStates kernel launch failed: ", cudaGetErrorString(status));
     return true;

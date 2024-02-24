@@ -106,12 +106,11 @@ void _TestAppendPagedKVKernelCorrectness(size_t page_size, size_t batch_size, si
     if (round % 2 == 0) {
       // call prefill kernel
       cudaError_t status =
-          AppendPagedKVCachePrefill(paged_kv_gpu, thrust::raw_pointer_cast(keys_gpu.data()),
-                                    thrust::raw_pointer_cast(values_gpu.data()),
-                                    thrust::raw_pointer_cast(append_indptr_gpu.data()));
-      EXPECT_EQ(status, cudaSuccess)
-          << "AppendPagedKVCachePrefill kernel launch failed, error message: "
-          << cudaGetErrorString(status);
+          AppendPagedKVCache(paged_kv_gpu, thrust::raw_pointer_cast(keys_gpu.data()),
+                             thrust::raw_pointer_cast(values_gpu.data()),
+                             thrust::raw_pointer_cast(append_indptr_gpu.data()));
+      EXPECT_EQ(status, cudaSuccess) << "AppendPagedKVCache kernel launch failed, error message: "
+                                     << cudaGetErrorString(status);
     } else {
       // call decode kernel
       cudaError_t status =
@@ -287,7 +286,7 @@ void TestAppendPagedKVKernelCorrectness() {
       for (size_t num_heads : {32}) {
         for (QKVLayout kv_layout : {QKVLayout::kNHD, QKVLayout::kHND}) {
           for (size_t head_dim : {64, 128, 256}) {
-            SWITCH_LAYOUT(kv_layout, KV_LAYOUT, {
+            DISPATCH_LAYOUT(kv_layout, KV_LAYOUT, {
               _TestAppendPagedKVKernelCorrectness<KV_LAYOUT, T>(page_size, batch_size, num_heads,
                                                                 head_dim);
             });
@@ -305,7 +304,7 @@ void TestPagedKVCacheToRaggedTensorCorrectness() {
       for (size_t num_heads : {32}) {
         for (QKVLayout kv_layout : {QKVLayout::kNHD, QKVLayout::kHND}) {
           for (size_t head_dim : {64, 128, 256}) {
-            SWITCH_LAYOUT(kv_layout, KV_LAYOUT, {
+            DISPATCH_LAYOUT(kv_layout, KV_LAYOUT, {
               _TestPagedKVCacheToRaggedTensorCorrectness<KV_LAYOUT, T>(page_size, batch_size,
                                                                        num_heads, head_dim);
             });
@@ -320,32 +319,34 @@ TEST(FlashInferCorrectnessTest, AppendPagedKVKernelCorrectnessTestFP16) {
   TestAppendPagedKVKernelCorrectness<half>();
 }
 
-TEST(FlashInferCorrectnessTest, AppendPagedKVKernelCorrectnessTestBF16) {
-  TestAppendPagedKVKernelCorrectness<__nv_bfloat16>();
+TEST(FlashInferCorrectnessTest, PagedKVCacheToRaggedTensorCorrectnessTestFP16) {
+  TestPagedKVCacheToRaggedTensorCorrectness<half>();
 }
 
 TEST(FlashInferCorrectnessTest, AppendPagedKVKernelCorrectnessTestFP32) {
   TestAppendPagedKVKernelCorrectness<float>();
 }
 
+TEST(FlashInferCorrectnessTest, PagedKVCacheToRaggedTensorCorrectnessTestFP32) {
+  TestPagedKVCacheToRaggedTensorCorrectness<float>();
+}
+
+#ifdef FLASHINFER_ENABLE_BF16
+TEST(FlashInferCorrectnessTest, AppendPagedKVKernelCorrectnessTestBF16) {
+  TestAppendPagedKVKernelCorrectness<__nv_bfloat16>();
+}
+TEST(FlashInferCorrectnessTest, PagedKVCacheToRaggedTensorCorrectnessTestBF16) {
+  TestPagedKVCacheToRaggedTensorCorrectness<__nv_bfloat16>();
+}
+#endif
+
+#ifdef FLASHINFER_ENABLE_FP8
 TEST(FlashInferCorrectnessTest, AppendPagedKVKernelCorrectnessTestE4M3) {
   TestAppendPagedKVKernelCorrectness<__nv_fp8_e4m3>();
 }
 
 TEST(FlashInferCorrectnessTest, AppendPagedKVKernelCorrectnessTestE5M2) {
   TestAppendPagedKVKernelCorrectness<__nv_fp8_e5m2>();
-}
-
-TEST(FlashInferCorrectnessTest, PagedKVCacheToRaggedTensorCorrectnessTestFP16) {
-  TestPagedKVCacheToRaggedTensorCorrectness<half>();
-}
-
-TEST(FlashInferCorrectnessTest, PagedKVCacheToRaggedTensorCorrectnessTestBF16) {
-  TestPagedKVCacheToRaggedTensorCorrectness<__nv_bfloat16>();
-}
-
-TEST(FlashInferCorrectnessTest, PagedKVCacheToRaggedTensorCorrectnessTestFP32) {
-  TestPagedKVCacheToRaggedTensorCorrectness<float>();
 }
 
 TEST(FlashInferCorrectnessTest, PagedKVCacheToRaggedTensorCorrectnessTestE4M3) {
@@ -355,3 +356,4 @@ TEST(FlashInferCorrectnessTest, PagedKVCacheToRaggedTensorCorrectnessTestE4M3) {
 TEST(FlashInferCorrectnessTest, PagedKVCacheToRaggedTensorCorrectnessTestE5M2) {
   TestPagedKVCacheToRaggedTensorCorrectness<__nv_fp8_e5m2>();
 }
+#endif

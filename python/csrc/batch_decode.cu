@@ -20,10 +20,9 @@
 
 using namespace flashinfer;
 
-torch::Tensor batch_decode_with_padded_kv_cache(torch::Tensor q, torch::Tensor k_padded,
-                                                torch::Tensor v_padded, unsigned int layout,
-                                                unsigned int rotary_mode, float sm_scale,
-                                                float rope_scale, float rope_theta) {
+std::vector<torch::Tensor> batch_decode_with_padded_kv_cache(
+    torch::Tensor q, torch::Tensor k_padded, torch::Tensor v_padded, unsigned int layout,
+    unsigned int rotary_mode, float sm_scale, float rope_scale, float rope_theta, bool return_lse) {
   CHECK_INPUT(q);
   CHECK_INPUT(k_padded);
   CHECK_INPUT(v_padded);
@@ -46,84 +45,58 @@ torch::Tensor batch_decode_with_padded_kv_cache(torch::Tensor q, torch::Tensor k
     num_kv_heads = k_padded.size(1);
   }
 
+  cudaStream_t torch_current_stream = c10::cuda::getCurrentCUDAStream();
   auto o = torch::empty_like(q, q.options());
+  torch::Tensor lse = torch::empty({0});
+  if (return_lse) {
+    lse = torch::empty({batch_size, num_qo_heads}, q.options()).to(torch::kFloat32);
+  }
 
   bool success = DISPATCH_PYTORCH_DTYPE_TO_CTYPE(q.scalar_type(), c_type, [&] {
     c_type* tmp = nullptr;
-    float* lse = nullptr;
     cudaError_t status = BatchDecodeWithPaddedKVCache<c_type, c_type>(
         static_cast<c_type*>(q.data_ptr()), static_cast<c_type*>(k_padded.data_ptr()),
         static_cast<c_type*>(v_padded.data_ptr()), static_cast<c_type*>(o.data_ptr()),
         /*tmp=*/tmp,
-        /*lse=*/lse, batch_size, padded_kv_len, num_qo_heads, num_kv_heads, head_dim, kv_layout,
-        RotaryMode(rotary_mode), rope_scale, rope_theta);
+        /*lse=*/return_lse ? static_cast<float*>(lse.data_ptr()) : nullptr, batch_size,
+        padded_kv_len, num_qo_heads, num_kv_heads, head_dim, kv_layout, RotaryMode(rotary_mode),
+        rope_scale, rope_theta, torch_current_stream);
     TORCH_CHECK(status == cudaSuccess, "BatchDecodeWithPaddedKVCache failed with error code ",
                 status);
     return true;
   });
   TORCH_CHECK(success, "BatchDecodeWithPaddedKVCache kernel launch failed: supported data type");
-  return o;
-}
 
-std::vector<torch::Tensor> batch_decode_with_padded_kv_cache_return_lse(
-    torch::Tensor q, torch::Tensor k_padded, torch::Tensor v_padded, unsigned int layout,
-    unsigned int rotary_mode, float sm_scale, float rope_scale, float rope_theta) {
-  CHECK_INPUT(q);
-  CHECK_INPUT(k_padded);
-  CHECK_INPUT(v_padded);
-  CHECK_DIM(3, q);
-  CHECK_DIM(4, k_padded);
-  CHECK_DIM(4, v_padded);
-  CHECK_SHAPE(k_padded, v_padded);
-  CHECK_EQ(q.size(0), k_padded.size(0));
-  CHECK_EQ(q.size(2), k_padded.size(3));
-  unsigned int batch_size = q.size(0);
-  unsigned int num_qo_heads = q.size(1);
-  unsigned int head_dim = q.size(2);
-  unsigned int padded_kv_len, num_kv_heads;
-  QKVLayout kv_layout = static_cast<QKVLayout>(layout);
-  if (kv_layout == QKVLayout::kNHD) {
-    padded_kv_len = k_padded.size(1);
-    num_kv_heads = k_padded.size(2);
+  if (return_lse) {
+    return {o, lse};
   } else {
-    padded_kv_len = k_padded.size(2);
-    num_kv_heads = k_padded.size(1);
+    return {o};
   }
-
-  auto o = torch::empty_like(q, q.options());
-  auto lse = torch::empty({batch_size, num_qo_heads}, q.options().dtype(torch::kFloat32));
-
-  bool success = DISPATCH_PYTORCH_DTYPE_TO_CTYPE(q.scalar_type(), c_type, [&] {
-    cudaError_t status = BatchDecodeWithPaddedKVCache<c_type, c_type>(
-        static_cast<c_type*>(q.data_ptr()), static_cast<c_type*>(k_padded.data_ptr()),
-        static_cast<c_type*>(v_padded.data_ptr()), static_cast<c_type*>(o.data_ptr()),
-        /*tmp=*/nullptr,
-        /*lse=*/static_cast<float*>(lse.data_ptr()), batch_size, padded_kv_len, num_qo_heads,
-        num_kv_heads, head_dim, kv_layout, RotaryMode(rotary_mode), rope_scale, rope_theta);
-    TORCH_CHECK(status == cudaSuccess, "BatchDecodeWithPaddedKVCache failed with error code ",
-                status);
-    return true;
-  });
-  TORCH_CHECK(success, "BatchDecodeWithPaddedKVCache kernel launch failed: supported data type");
-  return {o, lse};
 }
 
 void BatchDecodeWithPagedKVCachePyTorchWrapper::BeginForward(
-    torch::Tensor indptr, torch::Tensor last_page_len, unsigned int batch_size,
-    unsigned int num_qo_heads, unsigned int num_kv_heads, unsigned int head_dim,
-    unsigned int page_size, unsigned int rotary_mode, torch::Tensor empty_data) {
+    torch::Tensor workspace_buffer, torch::Tensor indptr, torch::Tensor last_page_len,
+    unsigned int batch_size, unsigned int num_qo_heads, unsigned int num_kv_heads,
+    unsigned int head_dim, unsigned int page_size, unsigned int rotary_mode,
+    torch::Tensor empty_data) {
   // NOTE(zihao): not necessary to be CUDA tensor
   CHECK_CONTIGUOUS(indptr);
   CHECK_CONTIGUOUS(last_page_len);
+  CHECK_CONTIGUOUS(workspace_buffer);
   CHECK_DIM(1, indptr);
   CHECK_DIM(1, last_page_len);
+  CHECK_DIM(1, workspace_buffer);
   CHECK_EQ(indptr.scalar_type(), torch::kInt32);
   CHECK_EQ(indptr.scalar_type(), torch::kInt32);
+  size_t workspace_size_in_bytes = workspace_buffer.size(0) * workspace_buffer.element_size();
+  cudaStream_t torch_current_stream = c10::cuda::getCurrentCUDAStream();
+  handler_.SetCUDAStream(torch_current_stream);
 
   bool success = DISPATCH_PYTORCH_DTYPE_TO_CTYPE(empty_data.scalar_type(), c_type, [&] {
-    SWITCH_LAYOUT(kv_layout_, KV_LAYOUT, {
+    DISPATCH_LAYOUT(kv_layout_, KV_LAYOUT, {
       cudaError_t status =
           handler_.BeginForward<PageStorage::kIndices, KV_LAYOUT, c_type, c_type, int32_t>(
+              static_cast<void*>(workspace_buffer.data_ptr()), workspace_size_in_bytes,
               static_cast<int32_t*>(indptr.data_ptr()),
               static_cast<int32_t*>(last_page_len.data_ptr()), batch_size, num_qo_heads,
               num_kv_heads, head_dim, page_size, RotaryMode(rotary_mode));
@@ -175,13 +148,14 @@ std::vector<torch::Tensor> BatchDecodeWithPagedKVCachePyTorchWrapper::Forward(
   CHECK_EQ(paged_kv_indices.scalar_type(), torch::kInt32);
   CHECK_EQ(paged_kv_last_page_len.scalar_type(), torch::kInt32);
 
+  cudaStream_t torch_current_stream = c10::cuda::getCurrentCUDAStream();
   torch::Tensor o = torch::empty_like(q, q.options());
   torch::Tensor lse;
   if (return_lse) {
     lse = torch::empty({batch_size, num_qo_heads}, q.options()).to(torch::kFloat32);
   }
   bool success = DISPATCH_PYTORCH_DTYPE_TO_CTYPE(q.scalar_type(), c_type, [&] {
-    SWITCH_LAYOUT(kv_layout_, KV_LAYOUT, {
+    DISPATCH_LAYOUT(kv_layout_, KV_LAYOUT, {
       paged_kv_t<PageStorage::kIndices, KV_LAYOUT, c_type, int32_t> paged_kv(
           num_kv_heads, page_size, head_dim, batch_size,
           static_cast<c_type*>(paged_kv_data.data_ptr()),
@@ -190,10 +164,10 @@ std::vector<torch::Tensor> BatchDecodeWithPagedKVCachePyTorchWrapper::Forward(
           static_cast<int32_t*>(paged_kv_last_page_len.data_ptr()));
       cudaError_t status = BatchDecodeWithPagedKVCacheWrapper<PageStorage::kIndices, KV_LAYOUT,
                                                               c_type, c_type, int32_t>(
-          &handler_, static_cast<c_type*>(q.data_ptr()), paged_kv,
+          &handler_, static_cast<c_type*>(q.data_ptr()), /*q_rope_position=*/nullptr, paged_kv,
           static_cast<c_type*>(o.data_ptr()),
           /*lse=*/(return_lse ? static_cast<float*>(lse.data_ptr()) : nullptr), num_qo_heads,
-          RotaryMode(rotary_mode), rope_scale, rope_theta, /*stream=*/nullptr);
+          RotaryMode(rotary_mode), rope_scale, rope_theta, /*stream=*/torch_current_stream);
       TORCH_CHECK(status == cudaSuccess, "BatchDecodeWithPagedKVCache failed with error ",
                   cudaGetErrorString(status));
     });

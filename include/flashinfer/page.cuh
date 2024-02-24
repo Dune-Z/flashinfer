@@ -77,7 +77,7 @@ struct paged_kv_t {
   // The flattened key-value cache, used when page_storage == kIndices
   // Internal layout:
   // [max_num_pages, 2, num_heads, page_size, head_dim] if layout == HND
-  // [max_num_pages, 2, page_size, num_heads, head_dim] if layout == HND
+  // [max_num_pages, 2, page_size, num_heads, head_dim] if layout == NHD
   DType* data;
   // [nnz_pages] The page indices array, used when page_storage == kIndices
   IdType* indices;
@@ -88,6 +88,8 @@ struct paged_kv_t {
   IdType* indptr;
   // [batch_size] The offset of the last page for each request in the batch
   IdType* last_page_len;
+  // [batch_size] The start position of each request in the batch.
+  IdType* rope_pos_offset;
 
   /*!
    * \brief Construct an empty paged key-value cache
@@ -101,7 +103,8 @@ struct paged_kv_t {
         indices(nullptr),
         ptrs(nullptr),
         indptr(nullptr),
-        last_page_len(nullptr) {}
+        last_page_len(nullptr),
+        rope_pos_offset(nullptr) {}
 
   /*!
    * \brief Construct a paged key-value cache
@@ -113,12 +116,14 @@ struct paged_kv_t {
    * \param indices The page indices array
    * \param indptr The page indptr array
    * \param last_page_len The offset of the last page for each request in the batch
+   * \param rope_pos_offset The start position of each request in the batch.
    * \note This constructor should only be used when page_storage == kIndices
    */
   __host__ __device__ __forceinline__ paged_kv_t(uint32_t num_heads, uint32_t page_size,
                                                  uint32_t head_dim, uint32_t batch_size,
                                                  DType* data, IdType* indices, IdType* indptr,
-                                                 IdType* last_page_len)
+                                                 IdType* last_page_len,
+                                                 IdType* rope_pos_offset = nullptr)
       : num_heads(num_heads),
         page_size(page_size),
         head_dim(head_dim),
@@ -126,7 +131,8 @@ struct paged_kv_t {
         data(data),
         indices(indices),
         indptr(indptr),
-        last_page_len(last_page_len) {}
+        last_page_len(last_page_len),
+        rope_pos_offset(rope_pos_offset) {}
 
   /*!
    * \brief Construct a paged key-value cache
@@ -137,18 +143,22 @@ struct paged_kv_t {
    * \param ptrs The array of pointers to each active page
    * \param indptr The page indptr array
    * \param last_page_len The offset of the last page for each request in the batch
+   * \param rope_pos_offset The start position of each request in the batch.
    * \note This constructor should only be used when page_storage == kIndices
    */
   __host__ __device__ __forceinline__ paged_kv_t(uint32_t num_heads, uint32_t page_size,
                                                  uint32_t head_dim, uint32_t batch_size,
                                                  DType** ptrs, IdType* indptr,
-                                                 IdType* last_page_len)
+                                                 IdType* last_page_len,
+                                                 IdType* rope_pos_offset = nullptr)
       : num_heads(num_heads),
         page_size(page_size),
         head_dim(head_dim),
         batch_size(batch_size),
         ptrs(ptrs),
-        indptr(indptr) {}
+        indptr(indptr),
+        last_page_len(last_page_len),
+        rope_pos_offset(rope_pos_offset) {}
 
   /*!
    * \brief Compute the offset of k element in the allocated buffer.
@@ -415,10 +425,11 @@ cudaError_t AppendPagedKVCacheDecode(paged_kv_t<page_storage, layout, DType, IdT
   uint32_t head_dim = paged_kv.head_dim;
   uint32_t batch_size = paged_kv.batch_size;
   uint32_t num_heads = paged_kv.num_heads;
-  SWITCH_HEAD_DIM(head_dim, HEAD_DIM, {
+  DISPATCH_HEAD_DIM(head_dim, HEAD_DIM, {
     constexpr uint32_t vec_size = std::max(16 / sizeof(DType), HEAD_DIM / 32);
     uint32_t bdx = HEAD_DIM / vec_size;
     uint32_t bdy = num_heads;
+    // NOTE(Zihao): could be slow for small batch size, will optimize later
     dim3 nblks(batch_size);
     dim3 nthrs(bdx, bdy);
     auto kernel =
@@ -430,7 +441,7 @@ cudaError_t AppendPagedKVCacheDecode(paged_kv_t<page_storage, layout, DType, IdT
 }
 
 /*!
- * \brief Append new keys/values to the paged key-value cache in the prefill phase
+ * \brief Append new keys/values to the paged key-value cache
  * \tparam page_storage Whether to store indices or pointers of each active page
  * \tparam layout The layout of last 3 dimension in KV-Cache
  * \tparam DType The data type of the key-value cache
@@ -443,16 +454,16 @@ cudaError_t AppendPagedKVCacheDecode(paged_kv_t<page_storage, layout, DType, IdT
  * \return status Indicates whether CUDA calls are successful
  */
 template <PageStorage page_storage, QKVLayout layout, typename DType, typename IdType>
-cudaError_t AppendPagedKVCachePrefill(paged_kv_t<page_storage, layout, DType, IdType> paged_kv,
-                                      DType* key, DType* value, IdType* append_indptr,
-                                      cudaStream_t stream = nullptr) {
+cudaError_t AppendPagedKVCache(paged_kv_t<page_storage, layout, DType, IdType> paged_kv, DType* key,
+                               DType* value, IdType* append_indptr, cudaStream_t stream = nullptr) {
   uint32_t head_dim = paged_kv.head_dim;
   uint32_t batch_size = paged_kv.batch_size;
   uint32_t num_heads = paged_kv.num_heads;
-  SWITCH_HEAD_DIM(head_dim, HEAD_DIM, {
+  DISPATCH_HEAD_DIM(head_dim, HEAD_DIM, {
     constexpr uint32_t vec_size = std::max(16 / sizeof(DType), HEAD_DIM / 32);
     uint32_t bdx = HEAD_DIM / vec_size;
     uint32_t bdy = num_heads;
+    // NOTE(Zihao): could be slow for small batch size, will optimize later
     dim3 nblks(batch_size);
     dim3 nthrs(bdx, bdy);
     auto kernel =
@@ -529,10 +540,11 @@ cudaError_t PagedKVCacheToRaggedTensor(paged_kv_t<page_storage, layout, DType, I
   const uint32_t num_heads = paged_kv.num_heads;
   const uint32_t page_size = paged_kv.page_size;
 
-  SWITCH_HEAD_DIM(head_dim, HEAD_DIM, {
+  DISPATCH_HEAD_DIM(head_dim, HEAD_DIM, {
     constexpr uint32_t vec_size = std::max(16U / sizeof(DType), HEAD_DIM / 32U);
     uint32_t bdx = HEAD_DIM / vec_size;
     uint32_t bdy = num_heads;
+    // NOTE(Zihao): could be slow for small batch size, will optimize later
     dim3 nblks(batch_size);
     dim3 nthrs(bdx, bdy);
     auto kernel =
