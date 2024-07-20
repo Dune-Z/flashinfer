@@ -25,120 +25,34 @@ def ceil_div(a, b):
     return (a + b - 1) // b
 
 
-@pytest.mark.parametrize("batch_size", [12, 17])
-@pytest.mark.parametrize("unique_kv_len", [37, 17])
-@pytest.mark.parametrize("shared_kv_len", [54, 97, 1979])
-@pytest.mark.parametrize("num_heads", [8, 16])
-@pytest.mark.parametrize("head_dim", [128])
-def test_batch_decode_with_shared_prefix_padded_kv_cache(
-    batch_size, unique_kv_len, shared_kv_len, num_heads, head_dim
-):
-    q = torch.randn(batch_size, num_heads, head_dim).to(0).half()
-    k_shared = torch.randn(shared_kv_len, num_heads, head_dim).to(0).half()
-    v_shared = torch.randn(shared_kv_len, num_heads, head_dim).to(0).half()
-    k_unique = torch.randn(batch_size, unique_kv_len, num_heads, head_dim).to(0).half()
-    v_unique = torch.randn(batch_size, unique_kv_len, num_heads, head_dim).to(0).half()
-
-    o = flashinfer.batch_decode_with_shared_prefix_padded_kv_cache(
-        q, k_shared, v_shared, k_unique, v_unique
-    )
-
-    for i in range(batch_size):
-        qi = q[i]
-        ki = torch.cat([k_shared, k_unique[i]], dim=0)
-        vi = torch.cat([v_shared, v_unique[i]], dim=0)
-        o_ref_i = flashinfer.single_decode_with_kv_cache(qi, ki, vi)
-        o_i_np = o[i].cpu().numpy()
-        o_ref_i_np = o_ref_i.cpu().numpy()
-        numpy.testing.assert_allclose(o_i_np, o_ref_i_np, rtol=1e-3, atol=1e-3)
-
-
-@pytest.mark.parametrize("batch_size", [12, 17])
-@pytest.mark.parametrize("unique_kv_len", [37, 17])
-@pytest.mark.parametrize("shared_kv_len", [54, 97, 1979])
-@pytest.mark.parametrize("num_heads", [8, 16])
-@pytest.mark.parametrize("head_dim", [128])
-@pytest.mark.parametrize("page_size", [1, 4, 16])
-def test_batch_decode_with_shared_prefix_paged_kv_cache(
-    batch_size, unique_kv_len, shared_kv_len, num_heads, head_dim, page_size
-):
-    kv_layout = "NHD"
-    q = torch.randn(batch_size, num_heads, head_dim).to(0).half()
-    k_shared = torch.randn(shared_kv_len, num_heads, head_dim).to(0).half()
-    v_shared = torch.randn(shared_kv_len, num_heads, head_dim).to(0).half()
-    k_unique = torch.randn(batch_size, unique_kv_len, num_heads, head_dim).to(0).half()
-    v_unique = torch.randn(batch_size, unique_kv_len, num_heads, head_dim).to(0).half()
-
-    kv_data = (
-        torch.zeros(
-            batch_size * ceil_div(unique_kv_len, page_size),
-            2,
-            page_size,
-            num_heads,
-            head_dim,
-        )
-        .to(0)
-        .half()
-    )
-    kv_indices = (
-        torch.arange(0, batch_size * ceil_div(unique_kv_len, page_size)).to(0).int()
-    )
-    kv_indptr = torch.arange(0, batch_size + 1).to(0).int() * ceil_div(
-        unique_kv_len, page_size
-    )
-    kv_last_page_len = torch.full(
-        (batch_size,), (unique_kv_len - 1) % page_size + 1, dtype=torch.int32
-    ).to(0)
-
-    workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.int8).to(0)
-    wrapper = flashinfer.BatchDecodeWithSharedPrefixPagedKVCacheWrapper(
-        workspace_buffer, kv_layout
-    )
-    wrapper.begin_forward(
-        kv_indptr,
-        kv_indices,
-        kv_last_page_len,
-        num_heads,
-        num_heads,
-        head_dim,
-        page_size,
-        kv_data.dtype,
-    )
-    append_indptr = torch.arange(0, batch_size + 1).to(0).int() * unique_kv_len
-    flashinfer.append_paged_kv_cache(
-        k_unique.view(-1, num_heads, head_dim),
-        v_unique.view(-1, num_heads, head_dim),
-        append_indptr,
-        kv_data,
-        kv_indices,
-        kv_indptr,
-        kv_last_page_len,
-        kv_layout,
-    )
-
-    o_padded = flashinfer.batch_decode_with_shared_prefix_padded_kv_cache(
-        q, k_shared, v_shared, k_unique, v_unique
-    )
-    o_paged = wrapper.forward(q, k_shared, v_shared, kv_data)
-    numpy.testing.assert_allclose(
-        o_padded.cpu().numpy(), o_paged.cpu().numpy(), rtol=1e-3, atol=1e-3
-    )
-
-
+@pytest.mark.parametrize("stage", ["decode", "append"])
 @pytest.mark.parametrize("batch_size", [12, 17])
 @pytest.mark.parametrize("unique_kv_len", [37, 17])
 @pytest.mark.parametrize("shared_kv_len", [128, 512, 2048])
 @pytest.mark.parametrize("num_heads", [8, 16])
 @pytest.mark.parametrize("causal", [False, True])
-@pytest.mark.parametrize("head_dim", [128])
-@pytest.mark.parametrize("page_size", [1, 4, 16])
-def test_batch_prefill_with_shared_prefix_paged_kv_cache(
-    batch_size, unique_kv_len, shared_kv_len, num_heads, causal, head_dim, page_size
+@pytest.mark.parametrize("head_dim", [128, 256])
+@pytest.mark.parametrize("page_size", [1, 16])
+def test_batch_attention_with_shared_prefix_paged_kv_cache(
+    stage,
+    batch_size,
+    unique_kv_len,
+    shared_kv_len,
+    num_heads,
+    causal,
+    head_dim,
+    page_size,
 ):
+    if stage == "decode" and causal == True:
+        pytest.skip("Causal attention is not required in decode stage")
     assert shared_kv_len % page_size == 0
     kv_layout = "NHD"
-    q = torch.randn(batch_size * unique_kv_len, num_heads, head_dim).to(0).half()
-    q_indptr = torch.arange(0, batch_size + 1).to(0).int() * unique_kv_len
+    if stage == "append":
+        q = torch.randn(batch_size * unique_kv_len, num_heads, head_dim).to(0).half()
+        q_indptr = torch.arange(0, batch_size + 1).to(0).int() * unique_kv_len
+    else:
+        q = torch.randn(batch_size, num_heads, head_dim).to(0).half()
+        q_indptr = torch.arange(0, batch_size + 1).to(0).int()
     k_shared = torch.randn(shared_kv_len, num_heads, head_dim).to(0).half()
     v_shared = torch.randn(shared_kv_len, num_heads, head_dim).to(0).half()
     k_unique = torch.randn(batch_size * unique_kv_len, num_heads, head_dim).to(0).half()
@@ -195,12 +109,20 @@ def test_batch_prefill_with_shared_prefix_paged_kv_cache(
         kv_layout,
     )
 
-    baseline_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-        torch.empty(32 * 1024 * 1024, dtype=torch.int8).to(0), kv_layout
-    )
-    cascade_wrapper = flashinfer.BatchPrefillWithSharedPrefixPagedKVCacheWrapper(
-        torch.empty(32 * 1024 * 1024, dtype=torch.int8).to(0), kv_layout
-    )
+    if stage == "decode":
+        baseline_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+            torch.empty(32 * 1024 * 1024, dtype=torch.int8).to(0), kv_layout
+        )
+        cascade_wrapper = flashinfer.BatchDecodeWithSharedPrefixPagedKVCacheWrapper(
+            torch.empty(32 * 1024 * 1024, dtype=torch.int8).to(0), kv_layout
+        )
+    else:
+        baseline_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+            torch.empty(32 * 1024 * 1024, dtype=torch.int8).to(0), kv_layout
+        )
+        cascade_wrapper = flashinfer.BatchPrefillWithSharedPrefixPagedKVCacheWrapper(
+            torch.empty(32 * 1024 * 1024, dtype=torch.int8).to(0), kv_layout
+        )
 
     baseline_kv_indices_arr = []
     for i in range(batch_size):
@@ -219,36 +141,159 @@ def test_batch_prefill_with_shared_prefix_paged_kv_cache(
         ceil_div(shared_kv_len, page_size) + ceil_div(unique_kv_len, page_size)
     )
     baseline_kv_last_page_len = unique_last_page_len
-    baseline_wrapper.begin_forward(
-        q_indptr,
-        baseline_kv_indptr,
-        baseline_kv_indices,
-        baseline_kv_last_page_len,
-        num_heads,
-        num_heads,
-    )
-
-    o_baseline = baseline_wrapper.forward(q, kv_data, causal=causal)
+    if stage == "decode":
+        baseline_wrapper.begin_forward(
+            baseline_kv_indptr,
+            baseline_kv_indices,
+            baseline_kv_last_page_len,
+            num_heads,
+            num_heads,
+            head_dim,
+            page_size,
+        )
+        o_baseline = baseline_wrapper.forward(q, kv_data)
+    else:
+        baseline_wrapper.begin_forward(
+            q_indptr,
+            baseline_kv_indptr,
+            baseline_kv_indices,
+            baseline_kv_last_page_len,
+            num_heads,
+            num_heads,
+            head_dim,
+            page_size,
+        )
+        o_baseline = baseline_wrapper.forward(q, kv_data, causal=causal)
 
     cascade_kv_indices = unique_kv_indices
     cascade_kv_indptr = unique_kv_indptr
     cascade_kv_last_page_len = unique_last_page_len
-    cascade_wrapper.begin_forward(
-        q_indptr,
-        cascade_kv_indptr,
-        cascade_kv_indices,
-        cascade_kv_last_page_len,
-        num_heads,
-        num_heads,
-    )
 
-    o_cascade = cascade_wrapper.forward(q, k_shared, v_shared, kv_data, causal=causal)
+    if stage == "decode":
+        cascade_wrapper.begin_forward(
+            cascade_kv_indptr,
+            cascade_kv_indices,
+            cascade_kv_last_page_len,
+            num_heads,
+            num_heads,
+            head_dim,
+            page_size,
+        )
+        o_cascade = cascade_wrapper.forward(q, k_shared, v_shared, kv_data)
+    else:
+        cascade_wrapper.begin_forward(
+            q_indptr,
+            cascade_kv_indptr,
+            cascade_kv_indices,
+            cascade_kv_last_page_len,
+            num_heads,
+            num_heads,
+            head_dim,
+            page_size,
+        )
+        o_cascade = cascade_wrapper.forward(
+            q, k_shared, v_shared, kv_data, causal=causal
+        )
+
     numpy.testing.assert_allclose(
         o_baseline.cpu().numpy(), o_cascade.cpu().numpy(), rtol=1e-3, atol=1e-3
     )
 
 
+@pytest.mark.parametrize("seed", [0])
+@pytest.mark.parametrize("num_tries", [50])
+def test_merge_state_in_place_with_mask(seed, num_tries):
+    seq_len = 512
+    num_heads = 32
+    head_dim = 128
+    va = torch.randn(seq_len, num_heads, head_dim).half().to("cuda:0")
+    sa = torch.randn(seq_len, num_heads, dtype=torch.float32).to("cuda:0")
+    vb = torch.randn(seq_len, num_heads, head_dim).half().to("cuda:0")
+    sb = torch.randn(seq_len, num_heads, dtype=torch.float32).to("cuda:0")
+    va_orginal = va.clone()
+    sa_original = sa.clone()
+
+    # No mask.
+    flashinfer.merge_state_in_place(va, sa, vb, sb)
+    va_merged_ref = va.clone()
+    sa_merged_ref = sa.clone()
+    assert not torch.allclose(va_merged_ref, va_orginal)
+    assert not torch.allclose(sa_merged_ref, sa_original)
+
+    # Mask with all 1s. Should be identical to no mask.
+    mask = torch.ones(seq_len, dtype=torch.bool).to("cuda:0")
+    va = va_orginal.clone()
+    sa = sa_original.clone()
+    flashinfer.merge_state_in_place(va, sa, vb, sb, mask=mask)
+    va_merged = va
+    sa_merged = sa
+    numpy.testing.assert_allclose(
+        va_merged.cpu().numpy(), va_merged_ref.cpu().numpy(), rtol=1e-3, atol=1e-3
+    )
+    numpy.testing.assert_allclose(
+        sa_merged.cpu().numpy(), sa_merged_ref.cpu().numpy(), rtol=1e-3, atol=1e-3
+    )
+
+    # Mask with all zeros. Input and output should be identical.
+    mask = torch.zeros(seq_len, dtype=torch.bool).to("cuda:0")
+    va = va_orginal.clone()
+    sa = sa_original.clone()
+    flashinfer.merge_state_in_place(va, sa, vb, sb, mask=mask)
+    va_merged = va
+    sa_merged = sa
+    numpy.testing.assert_allclose(
+        va_merged.cpu().numpy(), va_orginal.cpu().numpy(), rtol=1e-3, atol=1e-3
+    )
+    numpy.testing.assert_allclose(
+        sa_merged.cpu().numpy(), sa_original.cpu().numpy(), rtol=1e-3, atol=1e-3
+    )
+
+    # Test some random masks.
+    randgen = torch.Generator(device="cuda:0")
+    randgen.manual_seed(seed)
+    for _ in range(num_tries):
+        rand_mask = (
+            torch.rand(seq_len, generator=randgen, dtype=torch.float32, device="cuda:0")
+            > 0.5
+        ).to(dtype=torch.bool)
+        true_indices = rand_mask.nonzero()
+        false_indices = (rand_mask == 0).nonzero()
+        va = va_orginal.clone()
+        sa = sa_original.clone()
+        flashinfer.merge_state_in_place(va, sa, vb, sb, mask=rand_mask)
+        va_merged = va
+        sa_merged = sa
+
+        numpy.testing.assert_allclose(
+            va_merged[false_indices].cpu().numpy(),
+            va_orginal[false_indices].cpu().numpy(),
+            rtol=1e-3,
+            atol=1e-3,
+        )
+        numpy.testing.assert_allclose(
+            sa_merged[false_indices].cpu().numpy(),
+            sa_original[false_indices].cpu().numpy(),
+            rtol=1e-3,
+            atol=1e-3,
+        )
+        numpy.testing.assert_allclose(
+            va_merged[true_indices].cpu().numpy(),
+            va_merged_ref[true_indices].cpu().numpy(),
+            rtol=1e-3,
+            atol=1e-3,
+        )
+        numpy.testing.assert_allclose(
+            sa_merged[true_indices].cpu().numpy(),
+            sa_merged_ref[true_indices].cpu().numpy(),
+            rtol=1e-3,
+            atol=1e-3,
+        )
+
+
 if __name__ == "__main__":
-    test_batch_decode_with_shared_prefix_padded_kv_cache(12, 37, 54, 8, 128)
-    test_batch_decode_with_shared_prefix_paged_kv_cache(12, 37, 54, 8, 128, 16)
-    test_batch_prefill_with_shared_prefix_paged_kv_cache(12, 37, 256, 8, True, 128, 16)
+    test_batch_attention_with_shared_prefix_paged_kv_cache(
+        "decode", 12, 37, 128, 8, False, 128, 16
+    )
+    test_batch_attention_with_shared_prefix_paged_kv_cache(
+        "apppend", 12, 37, 128, 8, True, 128, 16
+    )

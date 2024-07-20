@@ -36,13 +36,13 @@ echo "::endgroup::"
 
 echo "::group::Install build system"
 pip install ninja numpy
-pip install --upgrade setuptools wheel build
+pip install --upgrade setuptools==69.5.1 wheel build
 echo "::endgroup::"
 
 
 echo "::group::Build wheel for FlashInfer"
 cd "$PROJECT_ROOT/python"
-MAX_JOBS=32 FLASHINFER_BUILD_VERSION="${FLASHINFER_BUILD_VERSION}+cu${CUDA_MAJOR}${CUDA_MINOR}torch${FLASHINFER_CI_TORCH_VERSION}" python -m build --no-isolation
+FLASHINFER_BUILD_VERSION="${FLASHINFER_BUILD_VERSION}+cu${CUDA_MAJOR}${CUDA_MINOR}torch${FLASHINFER_CI_TORCH_VERSION}" python -m build --no-isolation
 rm -f dist/*.tar.gz
 python -m build --no-isolation --sdist
 echo "::endgroup::"

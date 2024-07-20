@@ -18,7 +18,7 @@ on:
       #   required: true
 
 env:
-  TORCH_CUDA_ARCH_LIST: "8.0 8.6 8.9 9.0+PTX"
+  TORCH_CUDA_ARCH_LIST: "8.0 8.9 9.0+PTX"
 
 jobs:
   build:
@@ -27,7 +27,7 @@ jobs:
       matrix:
         python: ["3.8", "3.9", "3.10", "3.11"]
         cuda: ["11.8", "12.1"]
-        torch: ["2.1", "2.2"]
+        torch: ["2.1", "2.2", "2.3"]
     runs-on: [self-hosted]
     steps:
       - uses: actions/checkout@v4
@@ -59,7 +59,7 @@ jobs:
 
   release:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted]
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -73,7 +73,30 @@ jobs:
         with:
           tag_name: ${{ inputs.tag_name }}
           files: |
-            python/dist/flashinfer-*.whl
+            python/dist/flashinfer*cp38*.whl
+
+      - uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ inputs.tag_name }}
+          files: |
+            python/dist/flashinfer*cp39*.whl
+
+      - uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ inputs.tag_name }}
+          files: |
+            python/dist/flashinfer*cp310*.whl
+
+      - uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ inputs.tag_name }}
+          files: |
+            python/dist/flashinfer*cp311*.whl
+
+      - uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ inputs.tag_name }}
+          files: |
             python/dist/flashinfer-*.tar.gz
 
       - name: Clone wheel index
@@ -82,17 +105,7 @@ jobs:
           WHL_TOKEN: ${{ secrets.WHL_TOKEN }}
 
       - name: Update wheel index
-        shell: python
-        run: |
-          import pathlib
-          import hashlib
-          import re
-          for path in sorted(pathlib.Path("python/dist").glob("*.whl")):
-            with open(path, "rb") as f:
-              sha256 = hashlib.sha256(f.read()).hexdigest()
-            ver, cu, torch = re.findall(r"flashinfer-([0-9.]+)\+cu(\d+)torch([0-9.]+)-", path.name)[0]
-            with open(f"flashinfer-whl/cu{cu}/torch{torch}/flashinfer/index.html", "a") as f:
-              f.write(f'<a href="https://github.com/flashinfer-ai/flashinfer/releases/download/v{ver}/{path.name}#sha256={sha256}">{path.name}</a><br>\n')
+        run: python3 scripts/update_whl_index.py
 
       - name: Push wheel index
         run: |

@@ -31,19 +31,11 @@ except ImportError as e:
         raise e
 
 from .decode import (
-    batch_decode_with_padded_kv_cache_return_lse,
     BatchDecodeWithPagedKVCacheWrapper,
 )
 from .prefill import (
     single_prefill_with_kv_cache_return_lse,
     BatchPrefillWithPagedKVCacheWrapper,
-)
-from .utils import (
-    expand_5d,
-    check_rotary_mode,
-    check_kv_layout,
-    RotaryMode,
-    TensorLayout,
 )
 
 
@@ -99,7 +91,11 @@ def merge_state(
 
 
 def merge_state_in_place(
-    v: torch.Tensor, s: torch.Tensor, v_other: torch.Tensor, s_other: torch.Tensor
+    v: torch.Tensor,
+    s: torch.Tensor,
+    v_other: torch.Tensor,
+    s_other: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
 ):
     r"""Merge the self-attention state ``(v, s)`` with another state
     ``(v_other, s_other)`` in-place.
@@ -118,6 +114,11 @@ def merge_state_in_place(
     s_other : torch.Tensor
         The other logsumexp value to be merged, expected to be a float32 tensor,
         shape: ``(seq_len, num_heads)``.
+    mask : Optional[torch.Tensor]
+        The boolean mask tensor for whether to merge the state for a corresponding sequence
+        or not. Useful for CUDA graphs. If not specified (default), will merge states for
+        all sequences.
+        shape: ``[seq_len]``
 
     Example
     -------
@@ -132,7 +133,7 @@ def merge_state_in_place(
     >>> s_other = torch.randn(seq_len, num_heads, dtype=torch.float32).to("cuda:0")
     >>> flashinfer.merge_state_in_place(v, s, v_other, s_other)
     """
-    _kernels.merge_state_in_place(v, s, v_other, s_other)
+    _kernels.merge_state_in_place(v, s, v_other, s_other, mask)
 
 
 def merge_states(v: torch.Tensor, s: torch.Tensor):
@@ -175,121 +176,6 @@ def merge_states(v: torch.Tensor, s: torch.Tensor):
     return _kernels.merge_states(v, s)
 
 
-def batch_decode_with_shared_prefix_padded_kv_cache(
-    q: torch.Tensor,
-    k_shared: torch.Tensor,
-    v_shared: torch.Tensor,
-    k_unique: torch.Tensor,
-    v_unique: torch.Tensor,
-    kv_layout: str = "NHD",
-    allow_fp16_qk_reduction=False,
-    sm_scale: Optional[float] = None,
-    rope_scale: Optional[float] = None,
-    rope_theta: Optional[float] = None,
-):
-    r"""Decode attention between queries and shared prefix kv-cache for batch of
-    requests.
-
-    Parameters
-    ----------
-    q : torch.Tensor
-        The query tensor, shape: ``[batch_size, num_qo_heads, head_dim]``.
-    k_shared : torch.Tensor
-        The shared prefix key tensor, shape:
-        ``[shared_prefix_len, num_kv_heads, head_dim]`` if :attr:`kv_layout` is ``NHD``,
-        or ``[num_kv_heads, shared_prefix_len, head_dim]`` if :attr:`kv_layout` is
-        ``HND``.
-    v_shared : torch.Tensor
-        The shared prefix value tensor, shape:
-        ``[shared_prefix_len, num_kv_heads, head_dim]`` if :attr:`kv_layout` is ``NHD``,
-        or ``[num_kv_heads, shared_prefix_len, head_dim]`` if :attr:`kv_layout` is
-        ``HND``.
-    k_unique : torch.Tensor
-        The request-independent suffix key tensor, shape:
-        ``[batch_size, unique_len, num_kv_heads, head_dim]`` if :attr:`kv_layout` is
-        ``NHD``, or ``[batch_size, num_kv_heads, unique_len, head_dim]`` if
-        :attr:`kv_layout` is ``HND``.
-    v_unique : torch.Tensor
-        The request-independent suffix value tensor, shape:
-        ``[batch_size, unique_len, num_kv_heads, head_dim]`` if :attr:`kv_layout` is
-        ``NHD``, or ``[batch_size, num_kv_heads, unique_len, head_dim]`` if
-        :attr:`kv_layout` is ``HND``.
-    kv_layout : str
-        The layout of the kv-cache, could be either "NHD" or "HND".
-    allow_fp16_qk_reduction : bool
-        Whether to use f16 for qk reduction (faster at the cost of slight precision
-        loss).
-    sm_scale : Optional[float]
-        The scale of softmax, if not provided, will be set to ``1 / sqrt(head_dim)``
-    rope_scale : Optional[float]
-        The scale used in RoPE interpolation, if not provided, will be set to ``1.0``.
-    rope_theta : Optional[float]
-        The theta used in RoPE, if not provided, will be set to ``1e4``.
-
-    Returns
-    -------
-    V : torch.Tensor
-        The attention output, shape: ``[batch_size, num_heads, head_dim]``
-
-    Example
-    -------
-    >>> import torch
-    >>> import flashinfer
-    >>> shared_prefix_len = 16384
-    >>> padded_unique_suffix_len = 2048
-    >>> batch_size = 53
-    >>> num_qo_heads = 32
-    >>> num_kv_heads = 32
-    >>> head_dim = 128
-    >>> q = torch.randn(batch_size, num_qo_heads, head_dim).half().to("cuda:0")
-    >>> k_shared = torch.randn(shared_prefix_len, num_kv_heads, head_dim).half().to("cuda:0")
-    >>> v_shared = torch.randn(shared_prefix_len, num_kv_heads, head_dim).half().to("cuda:0")
-    >>> k_unique = torch.randn(
-    ...     batch_size,
-    ...     padded_unique_suffix_len,
-    ...     num_kv_heads,
-    ...     head_dim
-    ... ).half().to("cuda:0")
-    >>> v_unique = torch.randn(
-    ...     batch_size,
-    ...     padded_unique_suffix_len,
-    ...     num_kv_heads,
-    ...     head_dim
-    ... ).half().to("cuda:0")
-    >>> o = flashinfer.batch_decode_with_shared_prefix_padded_kv_cache(
-    ...     q, k_shared, v_shared, k_unique, v_unique, kv_layout="NHD",
-    ...     allow_fp16_qk_reduction=True
-    ... )
-    >>> o.shape
-    torch.Size([53, 32, 128])
-    """
-    check_kv_layout(kv_layout)
-    V_shared, S_shared = single_prefill_with_kv_cache_return_lse(
-        q,
-        k_shared,
-        v_shared,
-        causal=False,
-        rotary_mode="NONE",
-        kv_layout=kv_layout,
-        allow_fp16_qk_reduction=allow_fp16_qk_reduction,
-        rope_scale=rope_scale,
-        rope_theta=rope_theta,
-    )
-    V_unique, S_unique = batch_decode_with_padded_kv_cache_return_lse(
-        q,
-        k_unique,
-        v_unique,
-        kv_layout=kv_layout,
-        rotary_mode="NONE",
-        sm_scale=sm_scale,
-        rope_scale=rope_scale,
-        rope_theta=rope_theta,
-    )
-
-    merge_state_in_place(V_shared, S_shared, V_unique, S_unique)
-    return V_shared
-
-
 class BatchDecodeWithSharedPrefixPagedKVCacheWrapper:
     r"""Wrapper class for decode attention with shared-prefix paged kv-cache for batch
     of requests.
@@ -306,8 +192,8 @@ class BatchDecodeWithSharedPrefixPagedKVCacheWrapper:
     >>> head_dim = 128
     >>> max_num_pages = 128
     >>> page_size = 16
-    >>> # allocate 16MB workspace buffer
-    >>> workspace_buffer = torch.empty(16 * 1024 * 1024, dtype=torch.uint8, device="cuda:0")
+    >>> # allocate 128MB workspace buffer
+    >>> workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda:0")
     >>> wrapper = flashinfer.BatchDecodeWithSharedPrefixPagedKVCacheWrapper(
     ...     workspace_buffer, "NHD"
     ... )
@@ -321,7 +207,7 @@ class BatchDecodeWithSharedPrefixPagedKVCacheWrapper:
     >>> unique_kv_last_page_len = torch.tensor(
     ...     [1, 7, 14, 4, 3, 1, 16], dtype=torch.int32, device="cuda:0"
     ... )
-    >>> unique_kv_data_at_layer = [
+    >>> unique_kv_cache_at_layer = [
     ...     torch.randn(
     ...         max_num_pages, 2, page_size, num_kv_heads, head_dim, dtype=torch.float16, device="cuda:0"
     ...     ) for _ in range(num_layers)
@@ -352,9 +238,9 @@ class BatchDecodeWithSharedPrefixPagedKVCacheWrapper:
     ...     q = torch.randn(batch_size, num_qo_heads, head_dim).half().to("cuda:0")
     ...     k_shared = shared_k_data_at_layer[i]
     ...     v_shared = shared_v_data_at_layer[i]
-    ...     unique_kv_data = unique_kv_data_at_layer[i]
+    ...     unique_kv_cache = unique_kv_cache_at_layer[i]
     ...     # compute batch decode attention, reuse auxiliary data structures for all layers
-    ...     o = wrapper.forward(q, k_shared, v_shared, unique_kv_data)
+    ...     o = wrapper.forward(q, k_shared, v_shared, unique_kv_cache)
     ...     outputs.append(o)
     ...
     >>> # clear auxiliary data structures
@@ -418,9 +304,6 @@ class BatchDecodeWithSharedPrefixPagedKVCacheWrapper:
             The dimension of the heads
         page_size : int
             The page size of the paged kv cache
-        rotary_mode : str
-            Whether to apply RoPE on-the-fly inside attention kernels, could be
-            ``NONE`` or ``LLAMA`` (LLAMA style rotary embedding).
         data_type : Union[str, torch.dtype]
             The data type of the paged kv cache
 
@@ -443,7 +326,7 @@ class BatchDecodeWithSharedPrefixPagedKVCacheWrapper:
             num_kv_heads,
             head_dim,
             page_size,
-            rotary_mode="NONE",
+            pos_encoding_mode="NONE",
             data_type=data_type,
         )
 
@@ -456,8 +339,9 @@ class BatchDecodeWithSharedPrefixPagedKVCacheWrapper:
         q: torch.Tensor,
         k_shared: torch.Tensor,
         v_shared: torch.Tensor,
-        unique_kv_data: torch.Tensor,
+        unique_kv_cache: torch.Tensor,
         allow_fp16_qk_reduction=False,
+        sm_scale: Optional[float] = None,
         rope_scale: Optional[float] = None,
         rope_theta: Optional[float] = None,
     ):
@@ -478,16 +362,25 @@ class BatchDecodeWithSharedPrefixPagedKVCacheWrapper:
             ``[shared_prefix_len, num_kv_heads, head_dim]`` if :attr:`kv_layout` is
             ``NHD``, or ``[num_kv_heads, shared_prefix_len, head_dim]`` if
             :attr:`kv_layout` is ``HND``.
-        unique_kv_data : torch.Tensor
-            A 5-D tensor of paged kv-cache data storing the request-independent suffix
-            key and value tensors, shape:
-            ``[max_num_pages, 2, page_size, num_kv_heads, head_dim]`` if
-            :attr:`kv_layout` is ``NHD``, or
-            ``[max_num_pages, 2, page_size, num_kv_heads, head_dim]`` if
-            :attr:`kv_layout` is ``HND``.
+        unique_kv_cache : Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]
+            The request-independent suffix paged KV-Cache stored as a tuple of tensors or a single tensor:
+
+            * a tuple ``(k_cache, v_cache)`` of 4-D tensors, each with shape:
+              ``[max_num_pages, page_size, num_kv_heads, head_dim]`` if :attr:`kv_layout` is ``NHD``,
+              and ``[max_num_pages, num_kv_heads, page_size, head_dim]`` if :attr:`kv_layout` is ``HND``.
+
+            * a single 5-D tensor with shape:
+              ``[max_num_pages, 2, page_size, num_kv_heads, head_dim]`` if
+              :attr:`kv_layout` is ``NHD``, and
+              ``[max_num_pages, 2, num_kv_heads, page_size, head_dim]`` if
+              :attr:`kv_layout` is ``NHD``. Where ``paged_kv_cache[:, 0]`` is the key-cache and
+              ``paged_kv_cache[:, 1]`` is the value-cache.
+
         allow_fp16_qk_reduction : bool
             Whether to use f16 for qk reduction (faster at the cost of slight precision
             loss).
+        sm_scale : Optional[float]
+            The scale of softmax, if not provided, will be set to ``1 / sqrt(head_dim)``.
         rope_scale : Optional[float]
             The scale used in RoPE interpolation, if not provided, will be set to
             ``1.0``.
@@ -504,16 +397,18 @@ class BatchDecodeWithSharedPrefixPagedKVCacheWrapper:
             k_shared,
             v_shared,
             causal=False,
-            rotary_mode="NONE",
+            pos_encoding_mode="NONE",
             kv_layout=self._kv_layout,
             allow_fp16_qk_reduction=allow_fp16_qk_reduction,
+            sm_scale=sm_scale,
             rope_scale=rope_scale,
             rope_theta=rope_theta,
         )
         V_unique, S_unique = self._batch_decode_wrapper.forward_return_lse(
             q,
-            unique_kv_data,
-            rotary_mode="NONE",
+            unique_kv_cache,
+            pos_encoding_mode="NONE",
+            sm_scale=sm_scale,
             rope_scale=rope_scale,
             rope_theta=rope_theta,
         )
@@ -537,8 +432,8 @@ class BatchPrefillWithSharedPrefixPagedKVCacheWrapper:
     >>> head_dim = 128
     >>> max_num_pages = 128
     >>> page_size = 16
-    >>> # allocate 16MB workspace buffer
-    >>> workspace_buffer = torch.empty(16 * 1024 * 1024, dtype=torch.uint8, device="cuda:0")
+    >>> # allocate 128MB workspace buffer
+    >>> workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda:0")
     >>> prefill_wrapper = flashinfer.BatchPrefillWithSharedPrefixPagedKVCacheWrapper(
     ...     workspace_buffer, "NHD"
     ... )
@@ -556,7 +451,7 @@ class BatchPrefillWithSharedPrefixPagedKVCacheWrapper:
     >>> paged_kv_last_page_len= torch.tensor(
     ...     [1, 7, 14, 4, 3, 1, 16], dtype=torch.int32, device="cuda:0"
     ... )
-    >>> kv_data_at_layer = [
+    >>> kv_cache_at_layer = [
     ...     torch.randn(
     ...         max_num_pages, 2, page_size, num_kv_heads, head_dim, dtype=torch.float16, device="cuda:0"
     ...     ) for _ in range(num_layers)
@@ -578,17 +473,19 @@ class BatchPrefillWithSharedPrefixPagedKVCacheWrapper:
     ...     paged_kv_indices,
     ...     paged_kv_last_page_len,
     ...     num_qo_heads,
-    ...     num_kv_heads
+    ...     num_kv_heads,
+    ...     head_dim,
+    ...     page_size,
     ... )
     >>> outputs = []
     >>> for i in range(num_layers):
     ...     q = torch.randn(nnz_qo, num_qo_heads, head_dim).half().to("cuda:0")
-    ...     kv_data = kv_data_at_layer[i]
+    ...     kv_cache = kv_cache_at_layer[i]
     ...     k_shared = shared_k_data_at_layer[i]
     ...     v_shared = shared_v_data_at_layer[i]
     ...     # compute batch prefill attention, reuse auxiliary data structures
     ...     o = prefill_wrapper.forward(
-    ...         q, k_shared, v_shared, kv_data, causal=True
+    ...         q, k_shared, v_shared, kv_cache, causal=True
     ...     )
     ...     outputs.append(o)
     ...
@@ -612,7 +509,7 @@ class BatchPrefillWithSharedPrefixPagedKVCacheWrapper:
         ----------
         workspace_buffer : torch.Tensor
             The user reserved workspace buffer used to store auxiliary data structures,
-            recommended size is 16MB, the device of the workspace buffer should be the
+            recommended size is 128MB, the device of the workspace buffer should be the
             same as the device of the input tensors.
         kv_layout : str
             The layout of the input k/v tensors, could be either ``NHD`` or ``HND``.
@@ -641,6 +538,8 @@ class BatchPrefillWithSharedPrefixPagedKVCacheWrapper:
         paged_kv_last_page_len: torch.Tensor,
         num_qo_heads: int,
         num_kv_heads: int,
+        head_dim: int,
+        page_size: int,
     ):
         r"""Create auxiliary data structures for shared-prefix batch prefill/append
         attention for multiple forward calls within the same prefill/append step.
@@ -660,6 +559,10 @@ class BatchPrefillWithSharedPrefixPagedKVCacheWrapper:
             The number of query/output heads.
         num_kv_heads : int
             The number of key/value heads.
+        head_dim : int
+            The dimension of the heads.
+        page_size : int
+            The page size of the paged kv-cache.
 
         Notes
         -----
@@ -679,6 +582,8 @@ class BatchPrefillWithSharedPrefixPagedKVCacheWrapper:
             paged_kv_last_page_len,
             num_qo_heads,
             num_kv_heads,
+            head_dim,
+            page_size,
         )
 
     def end_forward(self):
@@ -690,9 +595,10 @@ class BatchPrefillWithSharedPrefixPagedKVCacheWrapper:
         q: torch.Tensor,
         k_shared: torch.Tensor,
         v_shared: torch.Tensor,
-        unique_kv_data: torch.Tensor,
+        unique_kv_cache: torch.Tensor,
         causal: bool = True,
         allow_fp16_qk_reduction: bool = False,
+        sm_scale: Optional[float] = None,
         rope_scale: Optional[float] = None,
         rope_theta: Optional[float] = None,
     ):
@@ -713,18 +619,27 @@ class BatchPrefillWithSharedPrefixPagedKVCacheWrapper:
             ``[shared_prefix_len, num_kv_heads, head_dim]`` if :attr:`kv_layout` is
             ``NHD``, or ``[num_kv_heads, shared_prefix_len, head_dim]`` if
             :attr:`kv_layout` is ``HND``.
-        unique_kv_data : torch.Tensor
-            A 5-D tensor of paged kv-cache data storing the request-independent suffix
-            key and value tensors, shape:
-            ``[max_num_pages, 2, page_size, num_kv_heads, head_dim]`` if
-            :attr:`kv_layout` is ``NHD``, or
-            ``[max_num_pages, 2, page_size, num_kv_heads, head_dim]`` if
-            :attr:`kv_layout` is ``HND``.
+        unique_kv_cache : Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]
+            The request-independent suffix paged KV-Cache stored as a tuple of tensors or a single tensor:
+
+            * a tuple ``(k_cache, v_cache)`` of 4-D tensors, each with shape:
+              ``[max_num_pages, page_size, num_kv_heads, head_dim]`` if :attr:`kv_layout` is ``NHD``,
+              and ``[max_num_pages, num_kv_heads, page_size, head_dim]`` if :attr:`kv_layout` is ``HND``.
+
+            * a single 5-D tensor with shape:
+              ``[max_num_pages, 2, page_size, num_kv_heads, head_dim]`` if
+              :attr:`kv_layout` is ``NHD``, and
+              ``[max_num_pages, 2, num_kv_heads, page_size, head_dim]`` if
+              :attr:`kv_layout` is ``NHD``. Where ``paged_kv_cache[:, 0]`` is the key-cache and
+              ``paged_kv_cache[:, 1]`` is the value-cache.
+
         causal : bool
             Whether to apply causal mask on the attention matrix.
         allow_fp16_qk_reduction : bool
             Whether to use f16 for qk reduction (faster at the cost of slight precision
             loss).
+        sm_scale : Optional[float]
+            The scale of softmax, if not provided, will be set to ``1 / sqrt(head_dim)``.
         rope_scale : Optional[float]
             The scale used in RoPE interpolation, if not provided, will be set to
             ``1.0``.
@@ -741,18 +656,20 @@ class BatchPrefillWithSharedPrefixPagedKVCacheWrapper:
             k_shared,
             v_shared,
             causal=False,
-            rotary_mode="NONE",
+            pos_encoding_mode="NONE",
             kv_layout=self._kv_layout,
             allow_fp16_qk_reduction=allow_fp16_qk_reduction,
+            sm_scale=sm_scale,
             rope_scale=rope_scale,
             rope_theta=rope_theta,
         )
         V_unique, S_unique = self._batch_prefill_wrapper.forward_return_lse(
             q,
-            unique_kv_data,
+            unique_kv_cache,
             causal=causal,
-            rotary_mode="NONE",
+            pos_encoding_mode="NONE",
             allow_fp16_qk_reduction=allow_fp16_qk_reduction,
+            sm_scale=sm_scale,
             rope_scale=rope_scale,
             rope_theta=rope_theta,
         )

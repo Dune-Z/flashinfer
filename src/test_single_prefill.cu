@@ -15,9 +15,8 @@
  */
 #include <gtest/gtest.h>
 
-#include <flashinfer/prefill.cuh>
-
 #include "cpu_reference.h"
+#include "flashinfer_ops.cuh"
 #include "utils.h"
 
 using namespace flashinfer;
@@ -25,7 +24,7 @@ using namespace flashinfer;
 template <typename DTypeIn, typename DTypeOut>
 void _TestSinglePrefillKernelCorrectness(size_t qo_len, size_t kv_len, size_t num_qo_heads,
                                          size_t num_kv_heads, size_t head_dim, bool causal,
-                                         QKVLayout kv_layout, RotaryMode rotary_mode,
+                                         QKVLayout kv_layout, PosEncodingMode pos_encoding_mode,
                                          bool allow_fp16_qk_reduction, float rtol = 1e-3,
                                          float atol = 1e-3) {
   std::vector<DTypeIn> q(qo_len * num_qo_heads * head_dim);
@@ -42,22 +41,22 @@ void _TestSinglePrefillKernelCorrectness(size_t qo_len, size_t kv_len, size_t nu
   thrust::device_vector<DTypeIn> k_d(k);
   thrust::device_vector<DTypeIn> v_d(v);
   thrust::device_vector<DTypeOut> o_d(o);
-  thrust::device_vector<float> tmp_d(4 * 1024 * 1024);
+  thrust::device_vector<DTypeOut> tmp_d(16 * 1024 * 1024);
 
   cudaError_t status = flashinfer::SinglePrefillWithKVCache<DTypeIn, DTypeOut>(
       thrust::raw_pointer_cast(q_d.data()), thrust::raw_pointer_cast(k_d.data()),
       thrust::raw_pointer_cast(v_d.data()), thrust::raw_pointer_cast(o_d.data()),
       thrust::raw_pointer_cast(tmp_d.data()),
       /*lse=*/nullptr, num_qo_heads, num_kv_heads, qo_len, kv_len, head_dim, causal, kv_layout,
-      rotary_mode, allow_fp16_qk_reduction);
+      pos_encoding_mode, allow_fp16_qk_reduction);
 
   EXPECT_EQ(status, cudaSuccess) << "SinglePrefillWithKVCache kernel launch failed, error message: "
                                  << cudaGetErrorString(status);
 
   thrust::host_vector<DTypeOut> o_h(o_d);
-  std::vector<DTypeOut> o_ref = cpu_reference::single_mha<DTypeIn, DTypeOut>(
+  std::vector<DTypeOut> o_ref = cpu_reference::single_mha<DTypeIn, DTypeIn, DTypeOut>(
       q, k, v, qo_len, kv_len, num_qo_heads, num_kv_heads, head_dim, causal, kv_layout,
-      rotary_mode);
+      pos_encoding_mode);
   size_t num_results_error_atol = 0;
   bool nan_detected = false;
 
@@ -72,7 +71,7 @@ void _TestSinglePrefillKernelCorrectness(size_t qo_len, size_t kv_len, size_t nu
   std::cout << "num_qo_heads=" << num_qo_heads << ", num_kv_heads=" << num_kv_heads
             << ", qo_len=" << qo_len << ", kv_len=" << kv_len << ", head_dim=" << head_dim
             << ", causal=" << causal << ", kv_layout=" << QKVLayoutToString(kv_layout)
-            << ", rotary_mode=" << RotaryModeToString(rotary_mode)
+            << ", pos_encoding_mode=" << PosEncodingModeToString(pos_encoding_mode)
             << ", result_accuracy=" << result_accuracy << std::endl;
   EXPECT_GT(result_accuracy, 0.90) << "Result correctness test failed.";
   EXPECT_FALSE(nan_detected) << "Nan detected in the result.";
@@ -83,13 +82,13 @@ void TestSinglePrefillKernelLongContextCorrectness(bool allow_fp16_qk_reduction)
   for (size_t qo_len : {1, 31, 63, 127}) {
     for (size_t kv_len : {31717}) {
       for (size_t num_heads : {1}) {
-        for (size_t head_dim : {64, 128}) {
+        for (size_t head_dim : {64, 128, 256}) {
           for (bool causal : {false, true}) {
-            for (size_t rotary_mode : {0, 1}) {
+            for (size_t pos_encoding_mode : {0, 1}) {
               for (size_t kv_layout : {0, 1}) {
                 _TestSinglePrefillKernelCorrectness<DTypeIn, DTypeOut>(
                     qo_len, kv_len, num_heads, num_heads, head_dim, causal, QKVLayout(kv_layout),
-                    RotaryMode(rotary_mode), allow_fp16_qk_reduction);
+                    PosEncodingMode(pos_encoding_mode), allow_fp16_qk_reduction);
               }
             }
           }
@@ -106,14 +105,14 @@ void TestSinglePrefillKernelShortContextCorrectness(bool allow_fp16_qk_reduction
   for (size_t qkv_len : {2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37}) {
     for (size_t num_qo_heads : {32}) {
       for (size_t num_kv_heads : {4, 8, 32}) {
-        for (size_t head_dim : {64, 128}) {
+        for (size_t head_dim : {64, 128, 256}) {
           for (bool causal : {false, true}) {
-            for (size_t rotary_mode : {0, 1}) {
+            for (size_t pos_encoding_mode : {0, 1}) {
               for (size_t kv_layout : {0, 1}) {
                 _TestSinglePrefillKernelCorrectness<DTypeIn, DTypeOut>(
                     qkv_len, qkv_len, num_qo_heads, num_kv_heads, head_dim, causal,
-                    QKVLayout(kv_layout), RotaryMode(rotary_mode), allow_fp16_qk_reduction, rtol,
-                    atol);
+                    QKVLayout(kv_layout), PosEncodingMode(pos_encoding_mode),
+                    allow_fp16_qk_reduction, rtol, atol);
               }
             }
           }
@@ -128,13 +127,13 @@ void TestSinglePrefillKernelCorrectness(bool allow_fp16_qk_reduction) {
   for (size_t qo_len : {399, 400, 401}) {
     for (size_t kv_len : {533, 534, 535}) {
       for (size_t num_heads : {12}) {
-        for (size_t head_dim : {64, 128}) {
+        for (size_t head_dim : {64, 128, 256}) {
           for (bool causal : {false, true}) {
-            for (size_t rotary_mode : {0, 1}) {
+            for (size_t pos_encoding_mode : {0, 1}) {
               for (size_t kv_layout : {0, 1}) {
                 _TestSinglePrefillKernelCorrectness<DTypeIn, DTypeOut>(
                     qo_len, kv_len, num_heads, num_heads, head_dim, causal, QKVLayout(kv_layout),
-                    RotaryMode(rotary_mode), allow_fp16_qk_reduction);
+                    PosEncodingMode(pos_encoding_mode), allow_fp16_qk_reduction);
               }
             }
           }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 by FlashInfer team.
+ * Copyright (c) 2024 by FlashInfer team.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,16 +13,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#ifndef FLASHINFER_CUH_
-#define FLASHINFER_CUH_
+#ifndef FLASHINFER_GROUP_GEMV_CUH_
+#define FLASHINFER_GROUP_GEMV_CUH_
 
-#include "flashinfer/cascade.cuh"
-#include "flashinfer/decode.cuh"
-#include "flashinfer/handler.cuh"
-#include "flashinfer/layout.cuh"
-#include "flashinfer/page.cuh"
-#include "flashinfer/prefill.cuh"
-#include "flashinfer/rope.cuh"
-#include "flashinfer/wrapper.cuh"
+namespace flashinfer {
 
-#endif  // FLASHINFER_CUH_
+namespace group_gemm {
+
+// TODO(Zihao): port punica's bgmv kernel
+
+}  // namespace group_gemm
+
+}  // namespace flashinfer
+
+#endif  // FLASHINFER_GROUP_GEMV_CUH_

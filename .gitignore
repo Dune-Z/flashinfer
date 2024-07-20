@@ -1,4 +1,15 @@
+# ci
+flashinfer-whl/
+python/dist
+
+# Compile commands json file
+compile_commands.json
+
+# Generated inst files
+src/dispatch.inc
+
 # Generated cu files
+src/generated/
 python/csrc/generated/
 python/flashinfer/_build_meta.py
 

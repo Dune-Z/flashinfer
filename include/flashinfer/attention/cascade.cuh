@@ -18,10 +18,10 @@
 
 #include <cooperative_groups.h>
 
-#include "cp_async.cuh"
-#include "math.cuh"
+#include "../cp_async.cuh"
+#include "../math.cuh"
+#include "../utils.cuh"
 #include "state.cuh"
-#include "utils.cuh"
 
 namespace flashinfer {
 
@@ -81,6 +81,7 @@ __global__ void MergeStateKernel(DTypeIn* __restrict__ v_a, float* __restrict__ 
  * \param s The logsumexp value to be updated in-place. (n, h)
  * \param v_other The other v to be merged. (n, h, d)
  * \param s_other The other logsumexp value to be merged. (n, h)
+ * \param mask Optional mask of whether to merge given sequences or not. (n)
  * \param num_heads The number of heads of v and v_other.
  * \param head_dim The dimension of each head.
  * \note Both s and s_other are logsumexp values with base 2.
@@ -88,9 +89,13 @@ __global__ void MergeStateKernel(DTypeIn* __restrict__ v_a, float* __restrict__ 
 template <uint32_t vec_size, typename DType>
 __global__ void MergeStateInPlaceKernel(DType* __restrict__ v, float* __restrict__ s,
                                         DType* __restrict__ v_other, float* __restrict__ s_other,
-                                        uint32_t num_heads, uint32_t head_dim) {
-  uint32_t tx = threadIdx.x, ty = threadIdx.y;
+                                        uint8_t* __restrict__ mask, uint32_t num_heads,
+                                        uint32_t head_dim) {
   uint32_t pos = blockIdx.x;
+
+  if (mask != nullptr && mask[pos] == 0) return;
+
+  uint32_t tx = threadIdx.x, ty = threadIdx.y;
   uint32_t head_idx = ty;
 
   float s_val = s[pos * num_heads + head_idx];
@@ -383,13 +388,14 @@ cudaError_t MergeState(DTypeIn* v_a, float* s_a, DTypeIn* v_b, float* s_b, DType
  * \param seq_len The sequence length.
  * \param num_heads The number of heads of v and v_other.
  * \param head_dim The dimension of each head.
+ * \param mask Optional mask of whether to merge given sequences or not. (n)
  * \param stream The CUDA stream to execute the kernel.
  * \return status Indicates whether CUDA calls are successful
  * \note Both s and s_other are logsumexp values with base 2.
  */
 template <typename DType>
 cudaError_t MergeStateInPlace(DType* v, float* s, DType* v_other, float* s_other, uint32_t seq_len,
-                              uint32_t num_heads, uint32_t head_dim,
+                              uint32_t num_heads, uint32_t head_dim, uint8_t* mask = nullptr,
                               cudaStream_t stream = nullptr) {
   DISPATCH_HEAD_DIM(head_dim, HEAD_DIM, {
     constexpr uint32_t vec_size = std::max(16U / sizeof(DType), HEAD_DIM / 32U);
@@ -398,7 +404,7 @@ cudaError_t MergeStateInPlace(DType* v, float* s, DType* v_other, float* s_other
     dim3 nblks(seq_len);
     dim3 nthrs(bdx, bdy);
     auto kernel = MergeStateInPlaceKernel<vec_size, DType>;
-    void* args[] = {&v, &s, &v_other, &s_other, &num_heads, &head_dim};
+    void* args[] = {&v, &s, &v_other, &s_other, &mask, &num_heads, &head_dim};
     FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, 0, stream));
   });
   return cudaSuccess;
@@ -408,8 +414,8 @@ cudaError_t MergeStateInPlace(DType* v, float* s, DType* v_other, float* s_other
  * \brief Merge self-attention states of a list of index sets.
  * \tparam DTypeIn The data type of v.
  * \tparam DTypeOut The data type of v_merged.
- * \param v The partial v of index sets. (num_index_sets, n, h, d)
- * \param s The logsumexp value of index sets. (num_index_sets, n, h)
+ * \param v The partial v of index sets. (n, num_index_sets, h, d)
+ * \param s The logsumexp value of index sets. (n, num_index_sets, h)
  * \param v_merged The merged v of index sets union. (n, h, d)
  * \param s_merged The merged logsumexp value of index sets union. (n, h)
  * \param num_index_sets The number of index sets.

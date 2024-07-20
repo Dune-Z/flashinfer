@@ -15,11 +15,14 @@
  */
 #include <thrust/device_vector.h>
 
-#include <flashinfer/prefill.cuh>
 #include <nvbench/nvbench.cuh>
 
+#include "flashinfer_ops.cuh"
+
+using flashinfer::PosEncodingMode;
 using flashinfer::QKVLayout;
-using flashinfer::RotaryMode;
+
+inline uint32_t ceil_div(uint32_t a, uint32_t b) { return (a + b - 1) / b; }
 
 template <typename dtype_in, typename dtype_out, bool append>
 void bench_flashinfer_single_prefill(nvbench::state& state) {
@@ -34,32 +37,50 @@ void bench_flashinfer_single_prefill(nvbench::state& state) {
   size_t num_qo_heads = state.get_int64("num_qo_heads");
   size_t num_kv_heads = state.get_int64("num_kv_heads");
   size_t head_dim = state.get_int64("head_dim");
-  size_t rotary_mode = state.get_int64("rotary_mode");
+  size_t pos_encoding_mode = state.get_int64("pos_encoding_mode");
   size_t kv_layout = state.get_int64("kv_layout");
   bool causal = state.get_int64("causal");
   bool cooperative = state.get_int64("cooperative");
+  bool custom_mask = state.get_int64("custom_mask");
   bool allow_fp16_qk_reduction = state.get_int64("allow_fp16_qk_reduction");
   // Allocate input data:
   thrust::device_vector<dtype_in> Q(qo_len * num_qo_heads * head_dim);
   thrust::device_vector<dtype_in> K(kv_len * num_kv_heads * head_dim);
   thrust::device_vector<dtype_in> V(kv_len * num_kv_heads * head_dim);
+  thrust::device_vector<uint8_t> mask(ceil_div(qo_len * kv_len, 8));
   thrust::device_vector<dtype_out> O(qo_len * num_qo_heads * head_dim);
-  thrust::device_vector<float> tmp(8 * 1024 * 1024);
+  thrust::device_vector<dtype_out> tmp(16 * 1024 * 1024);
 
   // Provide throughput information:
   state.add_global_memory_reads<dtype_in>(
-      (2 * qo_len * num_qo_heads + 2 * kv_len * num_kv_heads) * head_dim, "Read");
+      (qo_len * num_qo_heads + 2 * kv_len * num_kv_heads) * head_dim, "Read");
   state.add_global_memory_writes<dtype_out>(qo_len * num_qo_heads * head_dim, "Write");
 
   state.exec(nvbench::exec_tag::timer, [&](nvbench::launch& launch, auto& timer) {
     timer.start();
-    cudaError_t status = flashinfer::SinglePrefillWithKVCache<dtype_in, dtype_out>(
-        thrust::raw_pointer_cast(Q.data()), thrust::raw_pointer_cast(K.data()),
-        thrust::raw_pointer_cast(V.data()), thrust::raw_pointer_cast(O.data()),
-        /*tmp=*/cooperative ? thrust::raw_pointer_cast(tmp.data()) : nullptr,
-        /*lse=*/nullptr, num_qo_heads, num_kv_heads, qo_len, kv_len, head_dim, causal,
-        QKVLayout(kv_layout), RotaryMode(rotary_mode), allow_fp16_qk_reduction, 1.f, 1e4,
-        launch.get_stream());
+    cudaError_t status;
+    if (custom_mask) {
+      status = flashinfer::SinglePrefillWithKVCacheCustomMask<dtype_in, dtype_out>(
+          thrust::raw_pointer_cast(Q.data()), thrust::raw_pointer_cast(K.data()),
+          thrust::raw_pointer_cast(V.data()), thrust::raw_pointer_cast(mask.data()),
+          thrust::raw_pointer_cast(O.data()),
+          /*tmp=*/cooperative ? thrust::raw_pointer_cast(tmp.data()) : nullptr,
+          /*lse=*/nullptr, num_qo_heads, num_kv_heads, qo_len, kv_len, head_dim,
+          QKVLayout(kv_layout), PosEncodingMode(pos_encoding_mode), allow_fp16_qk_reduction,
+          /*maybe_sm_scale=*/std::nullopt,
+          /*rope_scale=*/1.f,
+          /*rope_theta=*/1e4, launch.get_stream());
+    } else {
+      status = flashinfer::SinglePrefillWithKVCache<dtype_in, dtype_out>(
+          thrust::raw_pointer_cast(Q.data()), thrust::raw_pointer_cast(K.data()),
+          thrust::raw_pointer_cast(V.data()), thrust::raw_pointer_cast(O.data()),
+          /*tmp=*/cooperative ? thrust::raw_pointer_cast(tmp.data()) : nullptr,
+          /*lse=*/nullptr, num_qo_heads, num_kv_heads, qo_len, kv_len, head_dim, causal,
+          QKVLayout(kv_layout), PosEncodingMode(pos_encoding_mode), allow_fp16_qk_reduction,
+          /*maybe_sm_scale=*/std::nullopt,
+          /*rope_scale=*/1.f,
+          /*rope_theta=*/1e4, launch.get_stream());
+    }
     if (status != cudaSuccess) {
       state.skip("CUDA error: " + std::string(cudaGetErrorString(status)));
     }
@@ -94,8 +115,9 @@ void bench_flashinfer_single_prefill(nvbench::state& state) {
       .add_int64_axis("head_dim", {128})                                                    \
       .add_int64_axis("causal", {0, 1})                                                     \
       .add_int64_axis("kv_layout", {0, 1})                                                  \
-      .add_int64_axis("rotary_mode", {0, 1})                                                \
+      .add_int64_axis("pos_encoding_mode", {0, 1})                                          \
       .add_int64_axis("allow_fp16_qk_reduction", {0, 1})                                    \
+      .add_int64_axis("custom_mask", {0})                                                   \
       .add_int64_axis("cooperative", {1})
 
 #define BENCH_FLASHINFER_APPEND_PREFILL(dtype_in, dtype_out)                                  \
@@ -110,8 +132,9 @@ void bench_flashinfer_single_prefill(nvbench::state& state) {
       .add_int64_axis("head_dim", {128})                                                      \
       .add_int64_axis("causal", {0, 1})                                                       \
       .add_int64_axis("kv_layout", {0, 1})                                                    \
-      .add_int64_axis("rotary_mode", {0, 1})                                                  \
+      .add_int64_axis("pos_encoding_mode", {0, 1})                                            \
       .add_int64_axis("allow_fp16_qk_reduction", {0, 1})                                      \
+      .add_int64_axis("custom_mask", {0})                                                     \
       .add_int64_axis("cooperative", {0, 1})
 
 BENCH_FLASHINFER_PREFILL(half, half);

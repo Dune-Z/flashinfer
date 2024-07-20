@@ -16,9 +16,8 @@ limitations under the License.
 
 from .decode import (
     single_decode_with_kv_cache,
-    batch_decode_with_padded_kv_cache,
-    batch_decode_with_padded_kv_cache_return_lse,
     BatchDecodeWithPagedKVCacheWrapper,
+    CUDAGraphBatchDecodeWithPagedKVCacheWrapper,
 )
 from .prefill import (
     single_prefill_with_kv_cache,
@@ -26,15 +25,27 @@ from .prefill import (
     BatchPrefillWithRaggedKVCacheWrapper,
     BatchPrefillWithPagedKVCacheWrapper,
 )
+from .sparse import BlockSparseAttentionWrapper
 from .cascade import (
     merge_state,
     merge_state_in_place,
     merge_states,
-    batch_decode_with_shared_prefix_padded_kv_cache,
     BatchDecodeWithSharedPrefixPagedKVCacheWrapper,
     BatchPrefillWithSharedPrefixPagedKVCacheWrapper,
 )
 from .page import append_paged_kv_cache
+from .sampling import (
+    sampling_from_probs,
+    top_p_sampling_from_probs,
+    top_k_sampling_from_probs,
+    top_k_top_p_sampling_from_probs,
+    top_p_renorm_prob,
+    top_k_renorm_prob,
+    chain_speculative_sampling,
+)
+from .norm import rmsnorm
+from .group_gemm import SegmentGEMMWrapper
+from .quantization import packbits, segment_packbits
 
 try:
     from ._build_meta import __version__ as __version__

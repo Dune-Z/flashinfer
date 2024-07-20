@@ -16,7 +16,7 @@ Kernel Library for LLM Serving
 [![Documentation](https://github.com/flashinfer-ai/flashinfer/actions/workflows/build-doc.yml/badge.svg)](https://github.com/flashinfer-ai/flashinfer/actions/workflows/build-doc.yml)
 
 
-FlashInfer is a library for Language Languages Models that provides high-performance implementation of LLM GPU kernels such as FlashAttention,  PageAttention and LoRA. FlashInfer focus on LLM serving and inference, and delivers state-the-art performance across diverse scenarios.
+FlashInfer is a library for Large Language Models that provides high-performance implementation of LLM GPU kernels such as FlashAttention, PageAttention and LoRA. FlashInfer focus on LLM serving and inference, and delivers state-of-the-art performance across diverse scenarios.
 
 The unique features of FlashInfer include:
 1. **Comprehensive Attention Kernels**: Attention kernels that cover all the common use cases of LLM serving, including *single-request* and *batching* versions of *Prefill*, *Decode*, and *Append* kernels, on different formats of KV-Cache (Padded Tensor, Ragged Tensor, and Page Table).
@@ -38,8 +38,8 @@ Using our PyTorch API is the easiest way to get started:
 We provide prebuilt wheels for Linux and you can try out FlashInfer with the following command:
 
 ```bash
-# For CUDA 12.1 & torch 2.2
-pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.2
+# For CUDA 12.1 & torch 2.3
+pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.3
 # For other CUDA & torch versions, please check https://docs.flashinfer.ai/installation.html
 ```
 
@@ -72,13 +72,13 @@ num_qo_heads = 32
 q = torch.randn(num_qo_heads, head_dim).half().to(0)
 
 o = flashinfer.single_decode_with_kv_cache(q, k, v) # decode attention without RoPE on-the-fly
-o_rope_on_the_fly = flashinfer.single_decode_with_kv_cache(q, k, v, rotary_mode="LLAMA") # decode with LLaMA style RoPE on-the-fly
+o_rope_on_the_fly = flashinfer.single_decode_with_kv_cache(q, k, v, pos_encoding_mode="ROPE_LLAMA") # decode with LLaMA style RoPE on-the-fly
 
 # append attention
 append_qo_len = 128
 q = torch.randn(append_qo_len, num_qo_heads, head_dim).half().to(0) # append attention, the last 128 tokens in the KV-Cache are the new tokens
 o = flashinfer.single_prefill_with_kv_cache(q, k, v, causal=True) # append attention without RoPE on-the-fly, apply causal mask
-o_rope_on_the_fly = flashinfer.single_prefill_with_kv_cache(q, k, v, causal=True, rotary_mode="LLAMA") # append attention with LLaMA style RoPE on-the-fly, apply causal mask
+o_rope_on_the_fly = flashinfer.single_prefill_with_kv_cache(q, k, v, causal=True, pos_encoding_mode="ROPE_LLAMA") # append attention with LLaMA style RoPE on-the-fly, apply causal mask
 
 # prefill attention
 qo_len = 2048
@@ -112,6 +112,7 @@ Currently FlashInfer is adopted by the following projects:
 - [MLC-LLM](https://github.com/mlc-ai/mlc-llm)
 - [Punica](https://github.com/punica-ai/punica)
 - [sglang](https://github.com/sgl-project/sglang)
+- [ScaleLLM](https://github.com/vectorch-ai/ScaleLLM)
 
 ## Acknowledgement
 
